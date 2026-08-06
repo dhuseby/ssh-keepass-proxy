@@ -1,0 +1,11 @@
+[Unit]
+Description=Socket for ssh-keepass-proxy (SSH agent proxy with KeePassXC unlock-on-demand)
+Documentation=man:ssh-agent(1)
+
+[Socket]
+ListenStream=%t/ssh-auth-proxy.sock
+SocketMode=0600
+Accept=no
+
+[Install]
+WantedBy=sockets.target

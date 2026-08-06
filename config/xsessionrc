@@ -1,0 +1,7 @@
+# Point the X session at the ssh-keepass-proxy socket, which unlock-prompts
+# KeePassXC on demand and relays to the real ssh-agent.
+# Pre-setting SSH_AUTH_SOCK also makes /etc/X11/Xsession.d/90x11-common_ssh-agent
+# skip wrapping the session in its own (competing) ssh-agent.
+if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -S "$XDG_RUNTIME_DIR/ssh-auth-proxy.sock" -o -d "$XDG_RUNTIME_DIR" ]; then
+  export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-auth-proxy.sock"
+fi

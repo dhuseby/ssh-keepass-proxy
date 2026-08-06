@@ -1,0 +1,17 @@
+[Unit]
+Description=SSH agent proxy with KeePassXC unlock-on-demand
+After=keepassxc-ssh-agent.service
+Requires=keepassxc-ssh-agent.service
+
+[Service]
+Type=simple
+ExecStart=%h/Projects/personal/ssh-keepass-proxy/target/release/ssh-keepass-proxy
+Environment=RUST_LOG=info
+# Socket-activated: systemd passes the listen socket as fd 3 (LISTEN_FDS=1).
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=default.target

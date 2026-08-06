@@ -1,0 +1,28 @@
+[package]
+name = "ssh-keepass-proxy"
+authors = ["Dave Grantham <dwg@linuxprogrammer.org>"]
+version = "0.1.0"
+edition = "2024"
+description = "Socket-activated proxy that unlock-prompts KeePassXC on demand, then relays SSH agent protocol to the real ssh-agent."
+readme = "README.md"
+repository = "https://github.com/dhuseby/ssh-keepass-proxy"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+nix = { version = "0.31", default-features = false, features = ["fs", "user"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = "line-tables-only"
+strip = false

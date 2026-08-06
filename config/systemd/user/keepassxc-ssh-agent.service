@@ -1,0 +1,12 @@
+[Unit]
+Description=Real ssh-agent holding KeePassXC-loaded keys (ssh-keepass-proxy backend)
+Documentation=man:ssh-agent(1)
+PartOf=ssh-keepass-proxy.service
+
+[Service]
+Environment=SSH_AUTH_SOCK=%t/keepassxc-ssh-agent.sock
+ExecStart=/usr/bin/ssh-agent -D -a %t/keepassxc-ssh-agent.sock
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
