@@ -15,8 +15,14 @@ SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 AUTOSTART_DIR="$HOME/.config/autostart"
 KEEPASSXC_DROPIN_DIR="$SYSTEMD_USER_DIR/app-org.keepassxc.KeePassXC@autostart.service.d"
 KEEPASSXC_INI="$HOME/.config/keepassxc/keepassxc.ini"
+CACHE_INI="${XDG_CACHE_HOME:-$HOME/.cache}/keepassxc/keepassxc.ini"
+ENV_D_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/environment.d"
+DOCTOR="$REPO_DIR/config/ssh-keepass-doctor.sh"
+DOCTOR_LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ssh-keepass-doctor.lock"
 
 UID_NUM="$(id -u)"
+REAL_SOCK="/run/user/${UID_NUM}/keepassxc-ssh-agent.sock"
+PROXY_SOCK="/run/user/${UID_NUM}/ssh-auth-proxy.sock"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
@@ -27,6 +33,8 @@ require() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1
 require cargo
 require systemctl
 require ssh-agent
+require flock
+require xfconf-query
 
 # Step 1. Build the proxy -----------------------------------------------------
 log "Building the proxy (cargo build --release)"
@@ -39,6 +47,8 @@ mkdir -p "$SYSTEMD_USER_DIR"
 install -m 0644 "$CONFIG_DIR/systemd/user/keepassxc-ssh-agent.service" "$SYSTEMD_USER_DIR/"
 install -m 0644 "$CONFIG_DIR/systemd/user/ssh-keepass-proxy.socket" "$SYSTEMD_USER_DIR/"
 install -m 0644 "$CONFIG_DIR/systemd/user/ssh-keepass-proxy.service" "$SYSTEMD_USER_DIR/"
+install -m 0644 "$CONFIG_DIR/systemd/user/ssh-keepass-doctor.service" "$SYSTEMD_USER_DIR/"
+install -m 0644 "$CONFIG_DIR/systemd/user/ssh-keepass-doctor.timer" "$SYSTEMD_USER_DIR/"
 
 # Step 3. Wrap the KeePassXC autostart Exec= line -----------------------------
 log "Installing KeePassXC autostart .desktop to $AUTOSTART_DIR"
@@ -96,19 +106,35 @@ else
   log "  $ZSHRC already wires SSH_AUTH_SOCK; leaving it"
 fi
 
+# The systemd user manager builds its base environment from environment.d
+# files at login, and unset-environment cannot remove a base value, so this
+# file is what keeps the session-wide SSH_AUTH_SOCK pinned to the proxy socket.
+log "Installing $ENV_D_DIR/ssh.conf (session-wide base SSH_AUTH_SOCK)"
+mkdir -p "$ENV_D_DIR"
+ENV_D_TMP="$(mktemp "$ENV_D_DIR/ssh.conf.XXXXXX")"
+printf 'SSH_AUTH_SOCK=%s\n' "$PROXY_SOCK" > "$ENV_D_TMP"
+chmod 0644 "$ENV_D_TMP"
+mv "$ENV_D_TMP" "$ENV_D_DIR/ssh.conf"
+
+# Hold the doctor lock while KeePassXC and agent-related steps run, so the
+# watchdog does not interleave with the installer.
+log "Acquiring the doctor lock $DOCTOR_LOCK"
+exec 9>"$DOCTOR_LOCK"
+flock 9
+
 # Step 8. Configure KeePassXC -------------------------------------------------
 log "Patching KeePassXC settings in $KEEPASSXC_INI"
 mkdir -p "$(dirname "$KEEPASSXC_INI")"
 touch "$KEEPASSXC_INI"
 
-# Merge a key=value into an [INI] section, creating the section if absent.
-# Usage: ini_set <section> <key> <value>
+# Merge key=value into the [INI] section of FILE, creating the section if
+# absent. Writes through a temp file and mv, never in place.
+# Usage: ini_set <file> <section> <key> <value>
 ini_set() {
-  local section="$1" key="$2" value="$3" file="$KEEPASSXC_INI"
-  local tmp
-  tmp="$(mktemp)"
-  # If the key exists anywhere, rewrite it; if the section exists, ensure the
-  # key is set under it; otherwise append a new section.
+  local file="$1" section="$2" key="$3" value="$4" tmp mode
+  # The key matches in any section; the current key set has no collisions.
+  mode="$(stat -c '%a' "$file")"
+  tmp="$(mktemp "${file}.XXXXXX")"
   if grep -qE "^\s*${key}\s*=" "$file"; then
     # Replace existing key=value in place (preserves section it lives in).
     sed -E "s|^\s*${key}\s*=.*|${key}=${value}|" "$file" > "$tmp"
@@ -123,26 +149,54 @@ ini_set() {
     cp "$file" "$tmp"
     printf '\n[%s]\n%s=%s\n' "$section" "$key" "$value" >> "$tmp"
   fi
-  cat "$tmp" > "$file"
-  rm -f "$tmp"
+  chmod "$mode" "$tmp"
+  mv "$tmp" "$file"
 }
 
-ini_set SSHAgent Enabled true
-ini_set FdoSecrets ConfirmAccessItem false
-ini_set FdoSecrets Enabled true
-ini_set Security LockDatabaseIdle true
-ini_set Security LockDatabaseIdleSeconds 30
-ini_set Security LockDatabaseScreenLock true
+ini_set "$KEEPASSXC_INI" SSHAgent Enabled true
+ini_set "$KEEPASSXC_INI" FdoSecrets ConfirmAccessItem false
+ini_set "$KEEPASSXC_INI" FdoSecrets Enabled true
+ini_set "$KEEPASSXC_INI" Security LockDatabaseIdle true
+ini_set "$KEEPASSXC_INI" Security LockDatabaseIdleSeconds 30
+ini_set "$KEEPASSXC_INI" Security LockDatabaseScreenLock true
+
+# Pin the agent socket in the local-cache ini. KeePassXC 2.7.x prefers this
+# override over $SSH_AUTH_SOCK for the SSH agent connection, so a settings
+# save can no longer retune KeePassXC to a competing agent. KeePassXC holds
+# the file in memory and overwrites it on exit, so write only while it is not
+# running.
+if pgrep -x keepassxc >/dev/null 2>&1; then
+  warn "KeePassXC is running; skipped writing the override into $CACHE_INI"
+  warn "close KeePassXC and re-run install.sh, or set the SSH_AUTH_SOCK override field in the KeePassXC settings dialog (SSH Agent page)"
+else
+  mkdir -p "$(dirname "$CACHE_INI")"
+  test -f "$CACHE_INI" || touch "$CACHE_INI"
+  ini_set "$CACHE_INI" SSHAgent AuthSockOverride "$REAL_SOCK"
+fi
 
 # Step 9. Reload and enable units ---------------------------------------------
 log "Reloading systemd user daemon and enabling units"
 systemctl --user daemon-reload
 systemctl --user enable --now keepassxc-ssh-agent.service
 systemctl --user enable --now ssh-keepass-proxy.socket
+systemctl --user enable --now ssh-keepass-doctor.timer
 systemctl --user restart keepassxc-ssh-agent.service ssh-keepass-proxy.service
+
+# Step 10. Disable the xfce4-session built-in SSH agent -----------------------
+log "Disabling the xfce4-session built-in SSH agent (xfconf)"
+xfconf-query -c xfce4-session -p /startup/ssh-agent/enabled -n -t bool -s false >/dev/null
+
+# Step 11. Stop and remove stray and competing running SSH agents -------------
+log "Purging stray and competing SSH agents (doctor --purge)"
+# The installer holds the doctor lock for Steps 8–11; tell the child not to
+# lock again, which would deadlock against this parent.
+SSH_KEEPASS_DOCTOR_NO_LOCK=1 "$DOCTOR" --purge || warn "doctor --purge did not complete cleanly; see its output above (re-run install.sh after closing KeePassXC)"
+
+flock -u 9
 
 # Done -----------------------------------------------------------------------
 log "Install complete. Next manual steps from README:"
-echo "  - Put your SSH keys into the KeePassXC database as SSH agent entries."
-echo "  - After confirming KeePassXC holds all keys, remove on-disk private key files from ~/.ssh/ (Step 9 of README)."
-echo "  - Log out and log back in, then run the verification block in Step 10 of the README."
+echo "  - Step 8: confirm the SSH_AUTH_SOCK override field in the KeePassXC settings dialog (SSH Agent page)."
+echo "  - Step 9: remove the on-disk private key files from ~/.ssh/ after the real agent holds all keys."
+echo "  - Step 13: log out and back in, then run the verification block."
+echo "  - Run $DOCTOR any time for a status check; use --fix or --purge for repairs."

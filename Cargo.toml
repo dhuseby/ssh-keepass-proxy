@@ -1,7 +1,7 @@
 [package]
 name = "ssh-keepass-proxy"
 authors = ["Dave Grantham <dwg@linuxprogrammer.org>"]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Socket-activated proxy that unlock-prompts KeePassXC on demand, then relays SSH agent protocol to the real ssh-agent."
 readme = "README.md"
