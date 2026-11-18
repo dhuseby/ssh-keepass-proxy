@@ -1,0 +1,8 @@
+[Unit]
+Description=Repair ssh-keepass-proxy drift (KeePassXC pinning, xfce4-session agent, user environment)
+
+[Service]
+Type=oneshot
+ExecStart=%h/Projects/personal/ssh-keepass-proxy/config/ssh-keepass-doctor.sh --fix
+StandardOutput=journal
+StandardError=journal
